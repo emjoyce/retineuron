@@ -7,13 +7,10 @@ from neuron import h
 # Electric field
 # stimulus protocols (ie anodic first biphastic etc)
 
-# TODO: should active and return be separate?
 class Electrode:
-    def __init__(self, center_pos, diameter, shape='hex', role ='active',
-                height = 0):
-        self.position = np.array(center_pos)
-        self.diameter = diameter
-        self.shape = shape
-        self.role = role
-        self.height = height
-    pass 
+    def __init__(self, dir):
+        # read the file into class 
+        pass
+    def pull_xyzt():
+        # pull xyz coords at a given x y z location and time value t
+        pass
