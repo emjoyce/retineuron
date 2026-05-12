@@ -44,19 +44,49 @@ class Cell:
         for sec in self.all:
             sec.insert("extracellular")
     
+    # def get_segment_xyz(self):
+    #     # just returns the center xyz of each segment
+    #     # this will be used to compute the extracellular potential at each segment given some electric field
+    #     seg_xyz = []
+    #     seg_refs = []
+    #     for sec in self.all:
+    #         for seg in sec:
+    #             x = seg.x
+    #             xyz = [h.x3d(x, sec=sec), h.y3d(x, sec=sec), h.z3d(x, sec=sec)]
+    #             seg_xyz.append(xyz)
+    #             seg_refs.append(seg)
+    #     return np.array(seg_xyz), seg_refs
+    
     def get_segment_xyz(self):
+        """
+        Return the center xyz of each electrical segment.
+        Coordinates are in microns.
+        """
         # just returns the center xyz of each segment
         # this will be used to compute the extracellular potential at each segment given some electric field
         seg_xyz = []
         seg_refs = []
+
         for sec in self.all:
+            n3d = int(sec.n3d())
+
+            arc = np.array([sec.arc3d(i) for i in range(n3d)])
+            xs = np.array([sec.x3d(i) for i in range(n3d)])
+            ys = np.array([sec.y3d(i) for i in range(n3d)])
+            zs = np.array([sec.z3d(i) for i in range(n3d)])
+
             for seg in sec:
-                x = seg.x
-                xyz = [h.x3d(x, sec=sec), h.y3d(x, sec=sec), h.z3d(x, sec=sec)]
-                seg_xyz.append(xyz)
+                target_arc = seg.x * sec.L
+
+                x = np.interp(target_arc, arc, xs)
+                y = np.interp(target_arc, arc, ys)
+                z = np.interp(target_arc, arc, zs)
+
+                seg_xyz.append([x, y, z])
                 seg_refs.append(seg)
+
         return np.array(seg_xyz), seg_refs
-    
+        
     def get_vertices_edges_radii(self):
         # pulling from neuron obj for debugging purposes instead of from swc
         verts = []

@@ -3,24 +3,20 @@ from neuron import h
 import pickle
 from scipy.interpolate import RegularGridInterpolator
 
-# will contain:
-# Electrode
-# Electrode layouts
-# Electric field
-# stimulus protocols (ie anodic first biphastic etc)
 
+# TODO: might be y x z t if it is stored as i,j
 class Electrode:
     def __init__(self, dir):
 
         with open(dir, "rb") as f: # open and read the pickle file (in post process file)
             data = pickle.load(f)
         
-        self.V = data['v(x,y,z,t)_mv']                      # voltage: v(x position, y position, z position, time point) shape(501, 501, 3, 97)
+        self.V = data['v(x,y,z,t)_mv']                      # voltage: v(x position, y position, z position, time point) 
         self.x, self.y = data['2d_mesh_um']                 # x/y 2Dmesh (um)
-        self.z = np.array(data['z_um'])                     # z coordinates in micrometers
+        self.z = np.array(data['z_um'])                     # z coordinates in microns
         self.t_start = np.array(data['t_start_ms'])         # starting time (ms)
         self.t_end = np.array(data['t_end_ms'])             # ending time (ms)
-        self.pixel_coords = data['pixel_coordinates_um']    # 
+        self.pixel_coords = data['pixel_coordinates_um']    # pixel coordinates in microns (x,y,z) for each point in the 3D grid
     
         # use midpoint of each time bin
         self.t = (self.t_start + self.t_end) / 2
