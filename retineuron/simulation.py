@@ -11,7 +11,7 @@ class ExtracellularSimulation:
         self.t_field = np.array(electrode.t)
         self.t_play = self.t_field - self.t_field[0]
 
-        self.Ve_seg = None
+        self.v_external_seg = None
         self.ve_vectors = []
 
     def compute_segment_potentials(self):
@@ -54,14 +54,14 @@ class ExtracellularSimulation:
         self.t_play = self.t_field - self.t_field[0]
 
         # NEURON vector containing the time points 
-        t_vec = h.Vector(self.t_play)
+        self.t_vec = h.Vector(self.t_play)
 
         self.ve_vectors = []
 
         # Play one extracellular voltage over time into each segment.
         for seg_idx, seg in enumerate(self.cell.seg_refs):
             ve_vec = h.Vector(self.v_external_seg[seg_idx, :])
-            ve_vec.play(seg._ref_e_extracellular, t_vec, True)
+            ve_vec.play(seg._ref_e_extracellular, self.t_vec, True)
             self.ve_vectors.append(ve_vec)
 
     def run(self, dt=0.025, v_init=None, record_segments=None):
@@ -98,7 +98,7 @@ class ExtracellularSimulation:
             "eext_mV": np.array([np.array(eext) for eext in self.eext_rec]),
             "recorded_seg_indices": np.array(self.recorded_seg_indices),
             "seg_xyz_um": self.cell.seg_xyz,
-            "Ve_input_mV": self.Ve_seg,
+            "Ve_input_mV": self.v_external_seg,
         }
 
         return self.results

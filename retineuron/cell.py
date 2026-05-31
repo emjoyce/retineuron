@@ -7,7 +7,7 @@ h.load_file("stdrun.hoc")
 h.load_file("import3d.hoc")
 
 class Cell:
-    def __init__(self, swc_path, segment_length=20, Ra=100, cm=1, g_pas=1e-4, e_pas=-65):
+    def __init__(self, swc_path, segment_length=20, Ra=100, cm=1, g_pas=1e-4, e_pas=-45):
         self.segment_length = segment_length
         self.Ra = Ra
         self.cm = cm
