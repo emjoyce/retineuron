@@ -47,20 +47,35 @@ class Electrode:
         point = np.array([x, y, z, t]) 
         return self.interpolator(point).item()
 
-    def placing_elec(self, x, y, z, t, electrode_pos):
+    def shifted_field_withSpace(self, X, Y, Z, T, shift=(0, 0, 0)): # in um
         """
-        Neuron-centered coordinate system.
-
-        x,y,z = point in neuron-centered world space
-        electrode_pos = where electrode is located relative to neuron
+        X,Y,Z helps to create a space 
+        T: field in which time_point to be shifted
+        Move the electric field around in 3D space.
+        shift(x, y, z) = the distance you want to move the default center of the electric field.
         """
+        shift_x, shift_y, shift_z = shift
 
-        ex, ey, ez = electrode_pos
+        points = np.column_stack([ # create shift version
+            X.ravel() - shift_x,
+            Y.ravel() - shift_y,
+            Z.ravel() - shift_z,
+            np.full(X.size, T)
+        ])
 
-        # convert world coordinate to electrode-centered local coordinate
-        x_local = x - ex
-        y_local = y - ey
-        z_local = z - ez
+        V = self.interpolator(points)
+        return V.reshape(X.shape) # need for showing the plot
+    
+    def shifted_field(self, x, y, z, t, shift=(0, 0, 0)): 
+        """
+        only shift the field mathematically 
+        shift(x, y, z) = the distance you want to move the default center of the electric field.
+        """
+        sx, sy, sz = shift
 
-        point = np.array([x_local, y_local, z_local, t])
-        return self.interpolator(point).item()
+        return self.interpolator([
+            x - sx,
+            y - sy,
+            z - sz,
+            t
+        ])
