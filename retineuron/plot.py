@@ -230,7 +230,7 @@ def plot_electric_potential(electrode, time, axis='z', index=None, xlim=None,
 
 
 
-def plot_cell_extracellular_voltage(cell, simulation, time, x='x', y='y', 
+def plot_cell_extracellular_voltage(cell, simulation, time, x='x', y='z', 
                                     cmap='viridis', line_width=2, plot_soma=False,
                                     soma_size=300, ax=None, norm=None,
                                     color_bar_vrange=None,
@@ -252,7 +252,7 @@ def plot_cell_extracellular_voltage(cell, simulation, time, x='x', y='y',
     x : str, optional
         Which axis for x. Options: 'x', 'y', 'z'. Default is 'x'.
     y : str, optional
-        Which axis for y. Options: 'x', 'y', 'z'. Default is 'y'.
+        Which axis for y. Options: 'x', 'y', 'z'. Default is 'z'.
     cmap : str, optional
         Matplotlib colormap name. Default is 'viridis'.
     line_width : float, optional
@@ -276,7 +276,7 @@ def plot_cell_extracellular_voltage(cell, simulation, time, x='x', y='y',
     
     Examples
     --------
-    >>> fig, ax = plot_cell_extracellular_voltage(cell, sim, time=10.0, x='x', y='y')
+    >>> fig, ax = plot_cell_extracellular_voltage(cell, sim, time=10.0, x='x', y='z')
     """
     
     # Compute potentials if not already done

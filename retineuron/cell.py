@@ -134,3 +134,40 @@ class Cell:
         return (np.array(verts),
                 np.array(edges, dtype=int),
                 np.array(radii))
+
+    def get_soma_sections(self):
+        # pulls soma section objects
+        soma_sections = [sec for sec in self.soma]
+        return soma_sections
+
+
+    def get_soma_centroid(self):
+        # returns soma centroid in microns 
+        soma_points = []
+
+        for sec in self.get_soma_sections():
+            n3d = int(sec.n3d())
+            for point_idx in range(n3d):
+                soma_points.append([
+                    sec.x3d(point_idx),
+                    sec.y3d(point_idx),
+                    sec.z3d(point_idx),
+                ])
+
+        return np.mean(soma_points, dtype=float, axis = 0)
+
+    def get_terminal_segment_indices(self, terminal_um=10.0, axis="z"):
+        # pulls out a terminal proxy for class project # TODO once this is not class project, we have to have better indexing of terminals
+        # last 10 microns 
+        axis_to_idx = {"x": 0, "y": 1, "z": 2}
+
+        coord_idx = axis_to_idx[axis]
+        coords = self.seg_xyz[:, coord_idx]
+        distal_edge = np.max(coords)
+        threshold = distal_edge - float(terminal_um)
+
+        terminal_indices = np.flatnonzero(coords >= threshold)
+        if terminal_indices.size == 0:
+            terminal_indices = np.array([int(np.argmax(coords))])
+
+        return terminal_indices.astype(int)
