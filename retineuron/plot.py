@@ -808,3 +808,161 @@ def save_voltage_sequence(cell, simulation, electrode, out_dir,
         plt.close(fig)
 
     print(f"Saved {n_images} frames to {out_dir}")
+
+
+def plot_terminal_voltage_heatmap(sweep_results, time_idx=0, plane='xy', index=None,
+                                  ax=None, figsize=(8, 6), cmap='viridis',
+                                  norm=None, color_bar_vrange=None,
+                                  add_colorbar=True, return_data=False):
+    """
+    Plot mean terminal voltage from a placement sweep as a 2D heatmap.
+
+    Parameters
+    ----------
+    sweep_results : dict
+        Output from PlacementSweep.run_centered_grid() or
+        PlacementSweep.run_centered_vertical_sheet().
+    time_idx : int, optional
+        Time-bin index into sweep_results['t_ms'].
+    plane : str, optional
+        Two-axis plane to display. Options include 'xy', 'xz', 'yz', and 'zy'.
+    index : int or float, optional
+        Index or coordinate value along the remaining axis. If None, uses the
+        coordinate nearest 0 on that axis.
+    ax : matplotlib axes, optional
+        Axes object to plot on. If None, creates a new figure and axes.
+    figsize : tuple, optional
+        Figure size if creating a new figure. Default is (8, 6).
+    cmap : str, optional
+        Matplotlib colormap name. Default is 'viridis'.
+    norm : matplotlib.colors.Normalize, optional
+        Shared normalization for coloring.
+    color_bar_vrange : tuple(float, float) or None, optional
+        Optional fixed color limits for the colorbar as `(vmin, vmax)`.
+    add_colorbar : bool, optional
+        Whether to add a colorbar. Default is True.
+    return_data : bool, optional
+        If True, return the plotted slice and metadata.
+    """
+
+    if 'placement_anchor_xyz_um' in sweep_results:
+        placement_xyz_um = np.asarray(sweep_results['placement_anchor_xyz_um'])
+        coordinate_label = 'position'
+    elif 'placement_offsets_um' in sweep_results:
+        placement_xyz_um = np.asarray(sweep_results['placement_offsets_um'])
+        coordinate_label = 'offset'
+    else:
+        raise KeyError(
+            "sweep_results must contain 'placement_anchor_xyz_um' or 'placement_offsets_um'"
+        )
+
+    terminal_v_mV = np.asarray(sweep_results['terminal_v_mV'])
+    t_ms = np.asarray(sweep_results['t_ms'])
+
+    if placement_xyz_um.ndim != 2 or placement_xyz_um.shape[1] != 3:
+        raise ValueError("stored sweep coordinates must have shape (n_points, 3)")
+    if terminal_v_mV.ndim != 4:
+        raise ValueError("sweep_results['terminal_v_mV'] must have shape (x, y, z, t)")
+
+    plane = plane.lower()
+    if len(plane) != 2 or plane[0] == plane[1] or any(axis not in 'xyz' for axis in plane):
+        raise ValueError("plane must be one of 'xy', 'xz', 'yz', or 'zy'")
+
+    coords = {
+        'x': np.unique(placement_xyz_um[:, 0]),
+        'y': np.unique(placement_xyz_um[:, 1]),
+        'z': np.unique(placement_xyz_um[:, 2]),
+    }
+
+    expected_shape = (len(coords['x']), len(coords['y']), len(coords['z']))
+    if terminal_v_mV.shape[:3] != expected_shape:
+        raise ValueError(
+            "Grid shape implied by stored sweep coordinates does not match terminal_v_mV"
+        )
+
+    if not (0 <= time_idx < terminal_v_mV.shape[3]):
+        raise IndexError(f"time_idx must be between 0 and {terminal_v_mV.shape[3] - 1}")
+
+    sliced_axis = ({'x', 'y', 'z'} - set(plane)).pop()
+    sliced_coords = coords[sliced_axis]
+
+    if index is None:
+        index = int(np.argmin(np.abs(sliced_coords)))
+    elif not isinstance(index, (int, np.integer)):
+        index = int(np.argmin(np.abs(sliced_coords - index)))
+
+    if not (0 <= index < len(sliced_coords)):
+        raise IndexError(f"index must be between 0 and {len(sliced_coords) - 1}")
+
+    spatial_slice = np.take(terminal_v_mV[..., time_idx], index, axis='xyz'.index(sliced_axis))
+    current_order = [axis for axis in 'xyz' if axis != sliced_axis]
+    transpose_axes = [current_order.index(axis) for axis in plane]
+    voltage_slice = np.transpose(spatial_slice, axes=transpose_axes)
+
+    x_coords = coords[plane[0]]
+    y_coords = coords[plane[1]]
+    X, Y = np.meshgrid(x_coords, y_coords, indexing='ij')
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.get_figure()
+
+    if norm is None:
+        if color_bar_vrange is not None:
+            norm = _make_voltage_norm(
+                voltage_slice,
+                colorbar_mode='fixed',
+                fixed_range=color_bar_vrange,
+            )
+        else:
+            norm = _make_voltage_norm(voltage_slice)
+
+    im = ax.pcolormesh(
+        X,
+        Y,
+        voltage_slice,
+        shading='auto',
+        cmap=cmap,
+        norm=norm,
+    )
+
+    ax.set_xlabel(f"{plane[0]} {coordinate_label} (μm)")
+    ax.set_ylabel(f"{plane[1]} {coordinate_label} (μm)")
+    ax.set_title(
+        f"Mean Terminal Voltage\n"
+        f"{sliced_axis} = {sliced_coords[index]:.2f} μm, t = {t_ms[time_idx]:.2f} ms"
+    )
+    ax.set_aspect('equal')
+
+    if add_colorbar:
+        plt.colorbar(
+            im,
+            ax=ax,
+            label='Mean terminal voltage (mV)',
+            fraction=0.046,
+            pad=0.04,
+        )
+
+    if created_fig:
+        fig.tight_layout()
+
+    if return_data:
+        data = {
+            'time_idx': time_idx,
+            'actual_time': t_ms[time_idx],
+            'plane': plane,
+            'sliced_axis': sliced_axis,
+            'slice_index': index,
+            'slice_value': sliced_coords[index],
+            'voltage_slice': voltage_slice,
+            'x_coords': x_coords,
+            'y_coords': y_coords,
+            'norm': norm,
+            'mappable': im,
+        }
+        return fig, ax, data
+
+    return fig, ax

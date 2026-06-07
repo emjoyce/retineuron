@@ -167,6 +167,78 @@ class PlacementSweep:
         self.cell = cell
         self.electrode = electrode
 
+    @staticmethod
+    def get_placement_offsets_from_results(sweep_results):
+        if "placement_offsets_um" in sweep_results:
+            placement_offsets_um = np.asarray(sweep_results["placement_offsets_um"], dtype=float)
+            if placement_offsets_um.ndim != 2 or placement_offsets_um.shape[1] != 3:
+                raise ValueError("sweep_results['placement_offsets_um'] must have shape (n_points, 3)")
+            return placement_offsets_um
+
+        placement_anchor_xyz_um = np.asarray(sweep_results["placement_anchor_xyz_um"], dtype=float)
+        native_anchor_xyz_um = np.asarray(sweep_results["native_anchor_xyz_um"], dtype=float)
+
+        if placement_anchor_xyz_um.ndim != 2 or placement_anchor_xyz_um.shape[1] != 3:
+            raise ValueError("sweep_results['placement_anchor_xyz_um'] must have shape (n_points, 3)")
+        if native_anchor_xyz_um.shape != (3,):
+            raise ValueError("sweep_results['native_anchor_xyz_um'] must have shape (3,)")
+
+        return placement_anchor_xyz_um - native_anchor_xyz_um
+
+    def _get_baseline_offset_um(self, center_um, placement_by="soma", dendrite_um=10.0, axis="z"):
+        anchor_xyz_um = self.cell.get_placement_anchor_xyz(
+            placement_by=placement_by,
+            dendrite_um=dendrite_um,
+            axis=axis,
+        )
+        center_cell_um = np.asarray(center_um, dtype=float).copy()
+
+        # Align the selected anchor in x/y, but keep the lowest z as the lowest z in soma or dend.
+        return np.array([
+            center_cell_um[0] - anchor_xyz_um[0],
+            center_cell_um[1] - anchor_xyz_um[1],
+            center_cell_um[2],
+        ])
+
+    def _run_offsets(self, placement_offsets_um, output_shape, terminal_um=10.0,
+                     placement_by="soma", dendrite_um=10.0, axis="z",
+                     dt=None, v_init=None):
+        terminal_indices = self.cell.get_terminal_segment_indices(terminal_um=terminal_um)
+        native_anchor_xyz_um = self.cell.get_placement_anchor_xyz(
+            placement_by=placement_by,
+            dendrite_um=dendrite_um,
+            axis=axis,
+        )
+        placement_anchor_xyz_um = placement_offsets_um + native_anchor_xyz_um
+
+        traces = []
+        t_ms = None
+
+        for placement_offset_um in placement_offsets_um:
+            sim = ExtracellularSimulation(self.cell, self.electrode)
+            result = sim.run(
+                dt=dt,
+                v_init=v_init,
+                record_segments=terminal_indices.tolist(),
+                position_offset_um=placement_offset_um,
+            )
+
+            terminal_segment_traces = result["v_mV"].copy()
+            terminal_trace = np.mean(terminal_segment_traces, axis=0)
+            traces.append(terminal_trace)
+            if t_ms is None:
+                t_ms = result["t_ms"].copy()
+
+        return {
+            "placement_anchor_xyz_um": placement_anchor_xyz_um,
+            "native_anchor_xyz_um": native_anchor_xyz_um,
+            "placement_by": placement_by,
+            "dendrite_um": float(dendrite_um),
+            "placement_axis": axis,
+            "t_ms": t_ms if t_ms is not None else np.array([]),
+            "terminal_v_mV": np.array(traces).reshape(*output_shape, -1),
+        }
+
     def build_grid_offsets(self, radius_um, spacing_um):
         # grid for each cell location to be tested
         radius_um = float(radius_um)
@@ -184,8 +256,27 @@ class PlacementSweep:
 
         return np.column_stack([axis.ravel() for axis in grid_3d])
 
+    def build_vertical_sheet_offsets(self, y_radius_um, z_radius_um, y_spacing_um, z_spacing_um):
+        y_radius_um = float(y_radius_um)
+        z_radius_um = float(z_radius_um)
+        y_spacing_um = float(y_spacing_um)
+        z_spacing_um = float(z_spacing_um)
+
+        if y_radius_um < 0 or z_radius_um < 0:
+            raise ValueError("y_radius_um and z_radius_um must be greater than or equal to 0")
+        if y_spacing_um <= 0 or z_spacing_um <= 0:
+            raise ValueError("y_spacing_um and z_spacing_um must be positive")
+
+        x_values = np.array([0.0])
+        y_values = np.arange(-y_radius_um, y_radius_um + 0.5 * y_spacing_um, y_spacing_um)
+        z_values = np.arange(0.0, z_radius_um + 0.5 * z_spacing_um, z_spacing_um)
+        sheet = np.meshgrid(x_values, y_values, z_values, indexing="ij")
+
+        return np.column_stack([axis.ravel() for axis in sheet])
+
     def run_centered_grid(self, center_um=(0.0, 0.0, 0.0), radius_um=0.0, spacing_um=10.0,
-                          terminal_um=10.0, dt=None, v_init=None):
+                          terminal_um=10.0, placement_by="soma", dendrite_um=10.0,
+                          dt=None, v_init=None):
         # run cell sim at multiple placements in the electric field and pull out terminal responses
         center_um = np.asarray(center_um, dtype=float)
         if center_um.shape != (3,):
@@ -197,54 +288,25 @@ class PlacementSweep:
         y_values = np.arange(-radius_um, radius_um + 0.5 * spacing_um, spacing_um)
         z_values = np.arange(0.0, radius_um + 0.5 * spacing_um, spacing_um)
 
-        # pull soma. place the cell based on shifting around by soma location in xy coords, not z
-        soma_centroid_um = self.cell.get_soma_centroid()
-        center_cell_um = center_um.copy()
-        baseline_offset_um = np.array([
-            center_cell_um[0] - soma_centroid_um[0],
-            center_cell_um[1] - soma_centroid_um[1],
-            0.0,
-        ])
+        baseline_offset_um = self._get_baseline_offset_um(
+            center_um,
+            placement_by=placement_by,
+            dendrite_um=dendrite_um,
+            axis="z",
+        )
         grid_offsets_um = self.build_grid_offsets(radius_um=radius_um, spacing_um=spacing_um)
         placement_offsets_um = baseline_offset_um + grid_offsets_um
 
-        # terminal indicies for transmembrane voltage measure 
-        terminal_indices = self.cell.get_terminal_segment_indices(terminal_um=terminal_um)
-
-        traces = []
-        t_ms = None
-        # peaks = []
-        # run_results = []
-
-        # run sim for each placement! 
-        for placement_offset_um in placement_offsets_um:
-            sim = ExtracellularSimulation(self.cell, self.electrode)
-            result = sim.run(
-                dt=dt,
-                v_init=v_init,
-                record_segments=terminal_indices.tolist(),
-                position_offset_um=placement_offset_um,
-            )
-            # log terminal results 
-            terminal_segment_traces = result["v_mV"].copy()
-            # avg of all terminal segments across time points 
-            terminal_trace = np.mean(terminal_segment_traces, axis=0)
-            traces.append(terminal_trace)
-            if t_ms is None:
-                t_ms = result["t_ms"].copy()
-            # peaks.append(np.max(terminal_trace))
-            # run_results.append(result)
-
-        results = {
-            "placement_offsets_um": placement_offsets_um,
-            "t_ms": t_ms if t_ms is not None else np.array([]),
-            "terminal_v_mV": np.array(traces).reshape(
-                len(x_values),
-                len(y_values),
-                len(z_values),
-                -1,
-            ),
-        }
+        results = self._run_offsets(
+            placement_offsets_um,
+            output_shape=(len(x_values), len(y_values), len(z_values)),
+            terminal_um=terminal_um,
+            placement_by=placement_by,
+            dendrite_um=dendrite_um,
+            axis="z",
+            dt=dt,
+            v_init=v_init,
+        )
 
         #  results = {
         #     "center_um": center_um,
@@ -265,3 +327,45 @@ class PlacementSweep:
         # }
 
         return results
+
+    def run_centered_vertical_sheet(self, center_um=(0.0, 0.0, 0.0), y_radius_um=0.0, z_radius_um=0.0,
+                                    y_spacing_um=10.0, z_spacing_um=10.0,
+                                    terminal_um=10.0, placement_by="soma", dendrite_um=10.0,
+                                    dt=None, v_init=None):
+        center_um = np.asarray(center_um, dtype=float)
+        if center_um.shape != (3,):
+            raise ValueError("center_um must be length 3")
+
+        y_radius_um = float(y_radius_um)
+        z_radius_um = float(z_radius_um)
+        y_spacing_um = float(y_spacing_um)
+        z_spacing_um = float(z_spacing_um)
+
+        x_values = np.array([0.0])
+        y_values = np.arange(-y_radius_um, y_radius_um + 0.5 * y_spacing_um, y_spacing_um)
+        z_values = np.arange(0.0, z_radius_um + 0.5 * z_spacing_um, z_spacing_um)
+
+        baseline_offset_um = self._get_baseline_offset_um(
+            center_um,
+            placement_by=placement_by,
+            dendrite_um=dendrite_um,
+            axis="z",
+        )
+        sheet_offsets_um = self.build_vertical_sheet_offsets(
+            y_radius_um=y_radius_um,
+            z_radius_um=z_radius_um,
+            y_spacing_um=y_spacing_um,
+            z_spacing_um=z_spacing_um,
+        )
+        placement_offsets_um = baseline_offset_um + sheet_offsets_um
+
+        return self._run_offsets(
+            placement_offsets_um,
+            output_shape=(len(x_values), len(y_values), len(z_values)),
+            terminal_um=terminal_um,
+            placement_by=placement_by,
+            dendrite_um=dendrite_um,
+            axis="z",
+            dt=dt,
+            v_init=v_init,
+        )

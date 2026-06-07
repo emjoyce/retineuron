@@ -171,3 +171,38 @@ class Cell:
             terminal_indices = np.array([int(np.argmax(coords))])
 
         return terminal_indices.astype(int)
+
+    def get_dendrite_segment_indices(self, dendrite_um=10.0, axis="z"):
+        # first 10 microns in the selected axis are treated as dendrites
+        axis_to_idx = {"x": 0, "y": 1, "z": 2}
+
+        coord_idx = axis_to_idx[axis]
+        coords = self.seg_xyz[:, coord_idx]
+        proximal_edge = np.min(coords)
+        threshold = proximal_edge + float(dendrite_um)
+
+        dendrite_indices = np.flatnonzero(coords <= threshold)
+        if dendrite_indices.size == 0:
+            dendrite_indices = np.array([int(np.argmin(coords))])
+
+        return dendrite_indices.astype(int)
+
+    def get_dendrite_centroid(self, dendrite_um=10.0, axis="z"):
+        dendrite_indices = self.get_dendrite_segment_indices(
+            dendrite_um=dendrite_um,
+            axis=axis,
+        )
+        return np.mean(self.seg_xyz[dendrite_indices], axis=0)
+
+    def get_placement_anchor_xyz(self, placement_by="soma", dendrite_um=10.0, axis="z"):
+        if placement_by == "soma":
+            return np.asarray(self.get_soma_centroid(), dtype=float)
+        if placement_by == "dendrite":
+            return np.asarray(
+                self.get_dendrite_centroid(dendrite_um=dendrite_um, axis=axis),
+                dtype=float,
+            )
+
+        raise ValueError("placement_by must be 'soma' or 'dendrite'")
+    
+
