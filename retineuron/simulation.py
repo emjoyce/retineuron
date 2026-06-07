@@ -2,6 +2,65 @@ import numpy as np
 import matplotlib.pyplot as plt
 from neuron import h
 
+# funcs for stitchign together e field sims 
+def _copy_simulation_state(state):
+    copied_state = {}
+    for key, value in state.items():
+        if isinstance(value, np.ndarray):
+            copied_state[key] = value.copy()
+        else:
+            copied_state[key] = value
+    return copied_state
+
+
+def _stitch_trace_arrays(first_array, second_array):
+    first_array = np.asarray(first_array)
+    second_array = np.asarray(second_array)
+
+    if first_array.size == 0:
+        return second_array.copy()
+    if second_array.size == 0:
+        return first_array.copy()
+
+    return np.concatenate([first_array, second_array[..., 1:]], axis=-1)
+
+
+def _stitch_time_vectors(first_t_ms, second_t_ms):
+    first_t_ms = np.asarray(first_t_ms, dtype=float)
+    second_t_ms = np.asarray(second_t_ms, dtype=float)
+
+    if first_t_ms.size == 0:
+        return second_t_ms.copy()
+    if second_t_ms.size == 0:
+        return first_t_ms.copy()
+
+    shifted_second_t_ms = first_t_ms[-1] + second_t_ms[1:]
+    return np.concatenate([first_t_ms, shifted_second_t_ms])
+
+
+def _stitch_trace_sequence(arrays):
+    arrays = [np.asarray(array) for array in arrays]
+    if not arrays:
+        return np.array([])
+
+    stitched = arrays[0].copy()
+    for array in arrays[1:]:
+        stitched = _stitch_trace_arrays(stitched, array)
+
+    return stitched
+
+
+def _stitch_time_sequence(time_vectors):
+    time_vectors = [np.asarray(time_vector, dtype=float) for time_vector in time_vectors]
+    if not time_vectors:
+        return np.array([], dtype=float)
+
+    stitched = time_vectors[0].copy()
+    for time_vector in time_vectors[1:]:
+        stitched = _stitch_time_vectors(stitched, time_vector)
+
+    return stitched
+
 
 class ExtracellularSimulation:
     def __init__(self, cell, electrode):
@@ -13,6 +72,8 @@ class ExtracellularSimulation:
 
         self.v_external_seg = None
         self.ve_vectors = []
+        self.initial_state = None
+        self.last_state = None
 
     def get_field_dt_ms(self):
         if self.t_play.size < 2:
@@ -21,6 +82,43 @@ class ExtracellularSimulation:
         dt_values = np.diff(self.t_play)
         dt_ms = float(dt_values[0])
         return dt_ms
+
+    def _get_state_dict(self, state):
+
+        segment_v_mV = np.asarray(state["segment_v_mV"], dtype=float)
+        if segment_v_mV.ndim != 1:
+            raise ValueError("state['segment_v_mV'] must be one-dimensional")
+        if segment_v_mV.shape[0] != len(self.cell.seg_refs):
+            raise ValueError("state segment count does not match the cell segment count")
+
+        return {
+            "segment_v_mV": segment_v_mV.copy(),
+            "t_ms": float(state.get("t_ms", 0.0)),
+            "n_segments": int(segment_v_mV.shape[0]),
+        }
+
+    def get_last_state(self):
+        state = {
+            "segment_v_mV": np.array([seg.v for seg in self.cell.seg_refs], dtype=float),
+            "t_ms": float(h.t),
+            "n_segments": len(self.cell.seg_refs),
+        }
+        self.last_state = _copy_simulation_state(state)
+        return _copy_simulation_state(state)
+
+    def load_state(self, state):
+        self.initial_state = self._get_state_dict(state)
+        return _copy_simulation_state(self.initial_state)
+
+    def _restore_loaded_state(self):
+        if self.initial_state is None:
+            return
+
+        for seg_idx, seg in enumerate(self.cell.seg_refs):
+            seg.v = float(self.initial_state["segment_v_mV"][seg_idx])
+
+        h.fcurrent()
+        h.frecord_init()
 
     def compute_segment_potentials(self, position_offset_um=None):
         seg_xyz = self.cell.seg_xyz # assumes that skel and vfield are already aligned, in same coords
@@ -61,25 +159,24 @@ class ExtracellularSimulation:
             self.electrode.t in ms
         """
 
-        # if we haven't already computed the potentials at each segment, do it
+        # compute volt at each seg, only if not alredy done
         if self.v_external_seg is None:
             self.compute_segment_potentials(position_offset_um=position_offset_um)
 
-        # Shift time so the NEURON simulation starts at t = 0 
+        # shifting time to start at 0
         self.t_field = np.array(self.electrode.t)
         self.t_play = self.t_field - self.t_field[0]
 
-        # NEURON vector containing the time points 
+        # save time vector
         self.t_vec = h.Vector(self.t_play)
 
         self.ve_vectors = []
 
-        # Play one extracellular voltage over time into each segment.
+        # play one extracellular voltage over time into each segment.
         for seg_idx, seg in enumerate(self.cell.seg_refs):
             ve_vec = h.Vector(self.v_external_seg[seg_idx, :])
             ve_vec.play(seg._ref_e_extracellular, self.t_vec, True)
             self.ve_vectors.append(ve_vec)
-# TODO dt should be pulled from the e field 
     def run(self, dt = None, v_init=None, record_segments=None, position_offset_um=None):
         """
         Apply extracellular stimulation, record response, and run NEURON.
@@ -110,7 +207,10 @@ class ExtracellularSimulation:
         h.tstop = float(self.t_play[-1])
 
         h.finitialize(v_init)
+        self._restore_loaded_state()
         h.continuerun(h.tstop)
+
+        final_state = self.get_last_state()
 
         # Convert recordings to arrays and store them.
         self.results = {
@@ -125,6 +225,8 @@ class ExtracellularSimulation:
             "Ve_input_mV": self.v_external_seg,
             "dt_ms": float(dt),
             "position_offset_um": np.zeros(3) if position_offset_um is None else np.asarray(position_offset_um, dtype=float),
+            "initial_state": None if self.initial_state is None else _copy_simulation_state(self.initial_state),
+            "final_state": final_state,
         }
 
         return self.results
@@ -140,16 +242,15 @@ class ExtracellularSimulation:
             imposed extracellular source e_extracellular
         """
 
-        # Default: record every segment.
+        # option to just record some segments, i.e. just terminals
         if seg_indices is None:
             seg_indices = range(len(self.cell.seg_refs))
 
         self.recorded_seg_indices = list(seg_indices)
 
-        # Record simulation time.
+        # keep time vec
         self.t_rec = h.Vector().record(h._ref_t)
 
-        # Store one Vector per recorded segment.
         self.v_rec = []
         self.vext_rec = []
         self.eext_rec = []
@@ -161,7 +262,212 @@ class ExtracellularSimulation:
             self.vext_rec.append(h.Vector().record(seg._ref_vext[0]))
             self.eext_rec.append(h.Vector().record(seg._ref_e_extracellular))
 
+# class that stitches two extracellular simulations togehter. 
+# needed if we want the object returned that can be used for plotting and analysis consistency and smoothness
+class ExtracellularStitchedStimulation:
+    def __init__(self, cell, electrodes):
+        self.cell = cell
 
+        try:
+            self.electrodes = list(electrodes)
+        except TypeError as exc:
+            raise TypeError("electrodes must be an iterable of electrode objects") from exc
+
+        if len(self.electrodes) == 0:
+            raise ValueError("electrodes must contain at least one electrode")
+
+        self.first_electrode = self.electrodes[0]
+        self.second_electrode = self.electrodes[1] if len(self.electrodes) > 1 else None
+
+        self.phase_sims = []
+        self.phase_results = []
+        self.first_sim = None
+        self.second_sim = None
+
+        self.initial_state = None
+        self.transition_states = []
+        self.transition_state = None
+        self.last_state = None
+
+        self.v_external_seg = None
+        self.t_field = np.array([], dtype=float)
+        self.t_play = np.array([], dtype=float)
+        self.field_dt_ms = np.array([], dtype=float)
+
+        self.sampled_seg_xyz_um = None
+        self.sampled_seg_xyz_electrode_um = None
+        self.results = None
+
+    def _sync_phase_aliases(self):
+        self.first_sim = self.phase_sims[0] if len(self.phase_sims) >= 1 else None
+        self.second_sim = self.phase_sims[1] if len(self.phase_sims) >= 2 else None
+        self.transition_state = (
+            _copy_simulation_state(self.transition_states[0])
+            if len(self.transition_states) == 1
+            else None
+        )
+
+    def _refresh_stitched_field_data(self):
+        if not self.phase_sims:
+            raise ValueError("At least one phase simulation must exist before stitching field data")
+        if any(phase_sim.v_external_seg is None for phase_sim in self.phase_sims):
+            raise ValueError("All phase simulations must have sampled field data before stitching")
+
+        self.v_external_seg = _stitch_trace_sequence(
+            [phase_sim.v_external_seg for phase_sim in self.phase_sims]
+        )
+        self.t_field = _stitch_time_sequence([phase_sim.t_play for phase_sim in self.phase_sims])
+        self.t_play = self.t_field.copy()
+        last_phase_sim = self.phase_sims[-1]
+        self.sampled_seg_xyz_um = last_phase_sim.sampled_seg_xyz_um.copy()
+        self.sampled_seg_xyz_electrode_um = last_phase_sim.sampled_seg_xyz_electrode_um.copy()
+
+    def get_field_dt_ms(self):
+        self.field_dt_ms = np.array([
+            ExtracellularSimulation(self.cell, electrode).get_field_dt_ms()
+            for electrode in self.electrodes
+        ], dtype=float)
+        return self.field_dt_ms.copy()
+
+    def load_state(self, state):
+        validator = ExtracellularSimulation(self.cell, self.first_electrode)
+        self.initial_state = validator._get_state_dict(state)
+        return _copy_simulation_state(self.initial_state)
+
+    def get_last_state(self):
+        if self.last_state is None:
+            raise ValueError("No final state is available; run the stitched simulation first")
+
+        return _copy_simulation_state(self.last_state)
+
+    def _get_dt_sequence(self, dt_sequence):
+        if dt_sequence is None:
+            return [None] * len(self.electrodes)
+
+        if np.isscalar(dt_sequence):
+            dt_value = float(dt_sequence)
+            return [dt_value] * len(self.electrodes)
+
+        dt_sequence = list(dt_sequence)
+        if len(dt_sequence) != len(self.electrodes):
+            raise ValueError("dt_sequence must match the number of electrodes")
+
+        normalized_dt_sequence = []
+        for dt_value in dt_sequence:
+            normalized_dt_sequence.append(None if dt_value is None else float(dt_value))
+
+        return normalized_dt_sequence
+
+    def compute_segment_potentials(self, position_offset_um=None):
+        self.phase_sims = [
+            ExtracellularSimulation(self.cell, electrode)
+            for electrode in self.electrodes
+        ]
+
+        for phase_sim in self.phase_sims:
+            phase_sim.compute_segment_potentials(position_offset_um=position_offset_um)
+
+        self._sync_phase_aliases()
+        self._refresh_stitched_field_data()
+        return self.v_external_seg
+
+    def run(self, v_init=None, record_segments=None, position_offset_um=None,
+            dt_sequence=None):
+        dt_sequence = self._get_dt_sequence(dt_sequence)
+
+        self.phase_sims = []
+        self.phase_results = []
+        self.transition_states = []
+
+        current_state = None if self.initial_state is None else _copy_simulation_state(self.initial_state)
+
+        for phase_idx, (electrode, dt_value) in enumerate(zip(self.electrodes, dt_sequence)):
+            phase_sim = ExtracellularSimulation(self.cell, electrode)
+            if current_state is not None:
+                phase_sim.load_state(current_state)
+
+            phase_result = phase_sim.run(
+                dt=dt_value,
+                v_init=v_init,
+                record_segments=record_segments,
+                position_offset_um=position_offset_um,
+            )
+
+            self.phase_sims.append(phase_sim)
+            self.phase_results.append(phase_result)
+
+            current_state = phase_sim.get_last_state()
+            if phase_idx < len(self.electrodes) - 1:
+                self.transition_states.append(_copy_simulation_state(current_state))
+
+        self._sync_phase_aliases()
+        self._refresh_stitched_field_data()
+        self.field_dt_ms = np.array([
+            phase_result["dt_ms"] for phase_result in self.phase_results
+        ], dtype=float)
+        self.last_state = _copy_simulation_state(self.phase_results[-1]["final_state"])
+
+        stitched_t_ms = _stitch_time_sequence([
+            phase_result["t_ms"] for phase_result in self.phase_results
+        ])
+        self.t_field = stitched_t_ms.copy()
+        self.t_play = stitched_t_ms.copy()
+
+        last_phase_result = self.phase_results[-1]
+
+        self.results = {
+            "t_ms": stitched_t_ms,
+            "v_mV": _stitch_trace_sequence([
+                phase_result["v_mV"] for phase_result in self.phase_results
+            ]),
+            "vext_mV": _stitch_trace_sequence([
+                phase_result["vext_mV"] for phase_result in self.phase_results
+            ]),
+            "eext_mV": _stitch_trace_sequence([
+                phase_result["eext_mV"] for phase_result in self.phase_results
+            ]),
+            "Ve_input_mV": self.v_external_seg.copy(),
+            "recorded_seg_indices": self.phase_results[0]["recorded_seg_indices"].copy(),
+            "seg_xyz_um": self.phase_results[0]["seg_xyz_um"].copy(),
+            "sampled_seg_xyz_um": self.sampled_seg_xyz_um.copy(),
+            "sampled_seg_xyz_electrode_um": self.sampled_seg_xyz_electrode_um.copy(),
+            "position_offset_um": last_phase_result["position_offset_um"].copy(),
+            "initial_state": None if self.initial_state is None else _copy_simulation_state(self.initial_state),
+            "final_state": _copy_simulation_state(self.last_state),
+            "field_dt_ms": self.field_dt_ms.copy(),
+            "transition_states": [
+                _copy_simulation_state(state) for state in self.transition_states
+            ],
+            "phases": list(self.phase_results),
+        }
+
+        if len(self.phase_results) == 2:
+            self.results["first"] = self.phase_results[0]
+            self.results["second"] = self.phase_results[1]
+            self.results["transition_state"] = _copy_simulation_state(self.transition_states[0])
+
+        return self.results
+
+# can also use this to record just the terminal verts over a many electrode sim byt setting record segments
+def run_field_sequence(cell, electrodes, v_init=None, record_segments=None,
+                       position_offset_um=None, dt_sequence=None):
+    """
+    Run any number of extracellular fields back-to-back on the same cell.
+
+    'electrodes' must be an iterable of electrode objects in execution order.
+    If 'dt_sequence' is omitted, each phase pulls 'dt' from its own field.
+    """
+
+    stitched_sim = ExtracellularStitchedStimulation(cell, electrodes)
+    stitched_sim.run(
+        v_init=v_init,
+        record_segments=record_segments,
+        position_offset_um=position_offset_um,
+        dt_sequence=dt_sequence,
+    )
+    return stitched_sim
+
+# func for placing cell in many locations in field and geting terminal volt
 class PlacementSweep:
     def __init__(self, cell, electrode):
         self.cell = cell
