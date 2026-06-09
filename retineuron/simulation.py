@@ -12,7 +12,6 @@ def _copy_simulation_state(state):
             copied_state[key] = value
     return copied_state
 
-
 def _stitch_trace_arrays(first_array, second_array):
     first_array = np.asarray(first_array)
     second_array = np.asarray(second_array)
@@ -23,7 +22,6 @@ def _stitch_trace_arrays(first_array, second_array):
         return first_array.copy()
 
     return np.concatenate([first_array, second_array[..., 1:]], axis=-1)
-
 
 def _stitch_time_vectors(first_t_ms, second_t_ms):
     first_t_ms = np.asarray(first_t_ms, dtype=float)
@@ -37,7 +35,6 @@ def _stitch_time_vectors(first_t_ms, second_t_ms):
     shifted_second_t_ms = first_t_ms[-1] + second_t_ms[1:]
     return np.concatenate([first_t_ms, shifted_second_t_ms])
 
-
 def _stitch_trace_sequence(arrays):
     arrays = [np.asarray(array) for array in arrays]
     if not arrays:
@@ -49,7 +46,6 @@ def _stitch_trace_sequence(arrays):
 
     return stitched
 
-
 def _stitch_time_sequence(time_vectors):
     time_vectors = [np.asarray(time_vector, dtype=float) for time_vector in time_vectors]
     if not time_vectors:
@@ -60,7 +56,6 @@ def _stitch_time_sequence(time_vectors):
         stitched = _stitch_time_vectors(stitched, time_vector)
 
     return stitched
-
 
 class ExtracellularSimulation:
     def __init__(self, cell, electrode):
@@ -76,12 +71,30 @@ class ExtracellularSimulation:
         self.last_state = None
 
     def get_field_dt_ms(self):
-        if self.t_play.size < 2:
+        if self.t_play.size >= 2:
+            dt_values = np.diff(self.t_play)
+            dt_ms = float(dt_values[0])
+            return dt_ms
+
+        full_t_play = np.asarray(self.electrode.t, dtype=float)
+        if full_t_play.size < 2:
             raise ValueError("Electrode time grid must contain at least two points to infer dt")
 
-        dt_values = np.diff(self.t_play)
+        full_t_play = full_t_play - full_t_play[0]
+        dt_values = np.diff(full_t_play)
         dt_ms = float(dt_values[0])
         return dt_ms
+
+    def _normalize_stop_time_idx(self, stop_time_idx):
+        if stop_time_idx is None:
+            return None
+
+        stop_time_idx = int(stop_time_idx)
+        n_t = len(self.electrode.t)
+        if not (0 <= stop_time_idx < n_t):
+            raise IndexError(f"stop_time_idx must be between 0 and {n_t - 1}")
+
+        return stop_time_idx
 
     def _get_state_dict(self, state):
 
@@ -150,7 +163,7 @@ class ExtracellularSimulation:
 
         return self.v_external_seg
     
-    def apply_extracellular_potential(self, position_offset_um=None):
+    def apply_extracellular_potential(self, position_offset_um=None, stop_time_idx=None):
         """
         apply the electrode voltage over time into every NEURON compartment
 
@@ -160,11 +173,17 @@ class ExtracellularSimulation:
         """
 
         # compute volt at each seg, only if not alredy done
-        if self.v_external_seg is None:
+        if self.v_external_seg is None or self.v_external_seg.shape[1] != len(self.electrode.t):
             self.compute_segment_potentials(position_offset_um=position_offset_um)
+
+        stop_time_idx = self._normalize_stop_time_idx(stop_time_idx)
 
         # shifting time to start at 0
         self.t_field = np.array(self.electrode.t)
+        if stop_time_idx is not None:
+            stop_slice = slice(None, stop_time_idx + 1)
+            self.t_field = self.t_field[stop_slice]
+            self.v_external_seg = self.v_external_seg[:, stop_slice]
         self.t_play = self.t_field - self.t_field[0]
 
         # save time vector
@@ -177,7 +196,8 @@ class ExtracellularSimulation:
             ve_vec = h.Vector(self.v_external_seg[seg_idx, :])
             ve_vec.play(seg._ref_e_extracellular, self.t_vec, True)
             self.ve_vectors.append(ve_vec)
-    def run(self, dt = None, v_init=None, record_segments=None, position_offset_um=None):
+    def run(self, dt = None, v_init=None, record_segments=None, position_offset_um=None,
+        stop_time_idx=None):
         """
         Apply extracellular stimulation, record response, and run NEURON.
 
@@ -187,6 +207,8 @@ class ExtracellularSimulation:
         record_segments: optional list of segment indices to record
         position_offset_um: optional placement offset applied only when sampling
             the extracellular field
+        stop_time_idx: optional inclusive index into the electrode time bins.
+            If provided, only run through that field sample.
         """
 
         # Use the cell's passive reversal as default initialization voltage.
@@ -194,7 +216,10 @@ class ExtracellularSimulation:
             v_init = self.cell.e_pas
 
         # Put the RPSim extracellular potential into NEURON.
-        self.apply_extracellular_potential(position_offset_um=position_offset_um)
+        self.apply_extracellular_potential(
+            position_offset_um=position_offset_um,
+            stop_time_idx=stop_time_idx,
+        )
 
         # Set up recordings before running.
         self.record(seg_indices=record_segments)
@@ -358,6 +383,26 @@ class ExtracellularStitchedStimulation:
 
         return normalized_dt_sequence
 
+    def _get_stop_phase_indices(self, stop_electrode):
+        if stop_electrode is None:
+            return []
+
+        if isinstance(stop_electrode, (int, np.integer)):
+            stop_idx = int(stop_electrode)
+            if not (0 <= stop_idx < len(self.electrodes)):
+                raise IndexError(f"stop_electrode must be between 0 and {len(self.electrodes) - 1}")
+            return [stop_idx]
+
+        stop_indices = [
+            electrode_idx
+            for electrode_idx, electrode in enumerate(self.electrodes)
+            if electrode is stop_electrode
+        ]
+        if not stop_indices:
+            raise ValueError("stop_electrode must be one of the electrodes in this stitched simulation")
+
+        return stop_indices
+
     def compute_segment_potentials(self, position_offset_um=None):
         self.phase_sims = [
             ExtracellularSimulation(self.cell, electrode)
@@ -372,8 +417,14 @@ class ExtracellularStitchedStimulation:
         return self.v_external_seg
 
     def run(self, v_init=None, record_segments=None, position_offset_um=None,
-            dt_sequence=None):
+            dt_sequence=None, stop_electrode=None, stop_time_idx=None):
         dt_sequence = self._get_dt_sequence(dt_sequence)
+
+        if (stop_electrode is None) != (stop_time_idx is None):
+            raise ValueError("stop_electrode and stop_time_idx must both be provided or both be None")
+
+        stop_phase_indices = self._get_stop_phase_indices(stop_electrode)
+        stop_phase_index_set = set(stop_phase_indices)
 
         self.phase_sims = []
         self.phase_results = []
@@ -386,11 +437,14 @@ class ExtracellularStitchedStimulation:
             if current_state is not None:
                 phase_sim.load_state(current_state)
 
+            phase_stop_time_idx = stop_time_idx if phase_idx in stop_phase_index_set else None
+
             phase_result = phase_sim.run(
                 dt=dt_value,
                 v_init=v_init,
                 record_segments=record_segments,
                 position_offset_um=position_offset_um,
+                stop_time_idx=phase_stop_time_idx,
             )
 
             self.phase_sims.append(phase_sim)
@@ -435,6 +489,8 @@ class ExtracellularStitchedStimulation:
             "initial_state": None if self.initial_state is None else _copy_simulation_state(self.initial_state),
             "final_state": _copy_simulation_state(self.last_state),
             "field_dt_ms": self.field_dt_ms.copy(),
+            "stop_electrode_indices": np.array(stop_phase_indices, dtype=int),
+            "stop_time_idx": None if stop_time_idx is None else int(stop_time_idx),
             "transition_states": [
                 _copy_simulation_state(state) for state in self.transition_states
             ],
@@ -450,7 +506,8 @@ class ExtracellularStitchedStimulation:
 
 # can also use this to record just the terminal verts over a many electrode sim byt setting record segments
 def run_field_sequence(cell, electrodes, v_init=None, record_segments=None,
-                       position_offset_um=None, dt_sequence=None):
+                       position_offset_um=None, dt_sequence=None,
+                       stop_electrode=None, stop_time_idx=None):
     """
     Run any number of extracellular fields back-to-back on the same cell.
 
@@ -464,6 +521,8 @@ def run_field_sequence(cell, electrodes, v_init=None, record_segments=None,
         record_segments=record_segments,
         position_offset_um=position_offset_um,
         dt_sequence=dt_sequence,
+        stop_electrode=stop_electrode,
+        stop_time_idx=stop_time_idx,
     )
     return stitched_sim
 
@@ -582,7 +641,7 @@ class PlacementSweep:
 
     def run_centered_grid(self, center_um=(0.0, 0.0, 0.0), radius_um=0.0, spacing_um=10.0,
                           terminal_um=10.0, placement_by="soma", dendrite_um=10.0,
-                          dt=None, v_init=None):
+                          dt=None, v_init=None, z_radius_um=None, z_spacing_um=None):
         # run cell sim at multiple placements in the electric field and pull out terminal responses
         center_um = np.asarray(center_um, dtype=float)
         if center_um.shape != (3,):
@@ -590,9 +649,11 @@ class PlacementSweep:
 
         radius_um = float(radius_um)
         spacing_um = float(spacing_um)
+        z_radius_um = radius_um if z_radius_um is None else float(z_radius_um)
+        z_spacing_um = spacing_um if z_spacing_um is None else float(z_spacing_um)
         x_values = np.arange(-radius_um, radius_um + 0.5 * spacing_um, spacing_um)
         y_values = np.arange(-radius_um, radius_um + 0.5 * spacing_um, spacing_um)
-        z_values = np.arange(0.0, radius_um + 0.5 * spacing_um, spacing_um)
+        z_values = np.arange(0.0, z_radius_um + 0.5 * z_spacing_um, z_spacing_um)
 
         baseline_offset_um = self._get_baseline_offset_um(
             center_um,
@@ -601,6 +662,9 @@ class PlacementSweep:
             axis="z",
         )
         grid_offsets_um = self.build_grid_offsets(radius_um=radius_um, spacing_um=spacing_um)
+        if z_radius_um != radius_um or z_spacing_um != spacing_um:
+            grid_3d = np.meshgrid(x_values, y_values, z_values, indexing="ij")
+            grid_offsets_um = np.column_stack([axis.ravel() for axis in grid_3d])
         placement_offsets_um = baseline_offset_um + grid_offsets_um
 
         results = self._run_offsets(

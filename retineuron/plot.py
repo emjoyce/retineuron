@@ -47,7 +47,8 @@ def plot_electric_potential(electrode, time, axis='z', index=None, xlim=None,
     electrode : Electrode
         Electrode object loaded from electric.py containing voltage data V(x,y,z,t)
     time : float
-        Time point at which to plot the potential (in ms)
+        Time point at which to plot the potential, in dt-relative ms starting
+        at 0.
     axis : str, optional
         Which plane to plot. Options:
         - 'z': Plot x-y plane (default), requires index to specify z position
@@ -91,9 +92,10 @@ def plot_electric_potential(electrode, time, axis='z', index=None, xlim=None,
     >>> fig, ax = plot_electric_potential(electrode, time=10.0, axis='z', ax=ax_custom[0])
     """
     
-    # Find the closest time index
-    time_idx = np.argmin(np.abs(electrode.t - time))
-    actual_time = electrode.t[time_idx]
+    # Interpret field time relative to the start of the electrode time bins.
+    field_t_values = np.asarray(electrode.t) - electrode.t[0]
+    time_idx = np.argmin(np.abs(field_t_values - time))
+    actual_time = field_t_values[time_idx]
     
     # Set default index to middle if not specified
     if index is None:
@@ -532,20 +534,16 @@ def plot_cell_on_electric(cell, simulation, electrode, time, axis='z', index=Non
     """
     Plot neuron morphology on top of electric potential.
 
-    time is NEURON-relative time.
-    field_time is RPSim/electrode absolute time.
+    time is dt-relative time starting at 0 for both the cell and field plots.
     """
 
     if cell_time is None:
         cell_time = time
 
-    # Convert NEURON-relative time to RPSim/electrode absolute time.
-    field_time = time + electrode.t[0]
-
     # First draw temporary field to get field norm/data, then remove it.
     fig, ax, field_data = plot_electric_potential(
         electrode,
-        field_time,
+        time,
         axis=axis,
         index=index,
         xlim=xlim,
@@ -563,14 +561,14 @@ def plot_cell_on_electric(cell, simulation, electrode, time, axis='z', index=Non
     field_data['mappable'].remove()
     field_norm = field_data['norm']
 
-    # Your existing skeleton_plot axis convention.
+    # Use the same spatial axis convention for the skeleton and electrode.
     if x is None or y is None:
         if axis == 'z':
-            skel_x, skel_y = 'x', 'z'
-        elif axis == 'y':
             skel_x, skel_y = 'x', 'y'
+        elif axis == 'y':
+            skel_x, skel_y = 'x', 'z'
         else:
-            skel_x, skel_y = 'z', 'y'
+            skel_x, skel_y = 'y', 'z'
     else:
         skel_x, skel_y = x, y
 
@@ -580,7 +578,7 @@ def plot_cell_on_electric(cell, simulation, electrode, time, axis='z', index=Non
         _, _, cell_data = plot_cell_extracellular_voltage(
             cell,
             simulation,
-            field_time,
+            time,
             x=skel_x,
             y=skel_y,
             cmap=cmap,
@@ -622,7 +620,7 @@ def plot_cell_on_electric(cell, simulation, electrode, time, axis='z', index=Non
     # Draw field second.
     _, _, field_data = plot_electric_potential(
         electrode,
-        field_time,
+        time,
         axis=axis,
         index=index,
         xlim=xlim,

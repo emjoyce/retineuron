@@ -8,11 +8,13 @@ h.load_file("import3d.hoc")
 
 class Cell:
     def __init__(self, swc_path, segment_length=20, Ra=100, cm=1, g_pas=1e-4, e_pas=-45):
+        self.swc_path = swc_path
         self.segment_length = segment_length
         self.Ra = Ra
         self.cm = cm
         self.g_pas = g_pas
         self.e_pas = e_pas
+        self.translation_um = np.zeros(3, dtype=float)
         
         self.load_morphology(swc_path)
         self.define_biophysics()
@@ -32,13 +34,58 @@ class Cell:
             # this further subdivides branch-branch or branch-end 'sections' into smaller 
             # electrical segments called nseg subdivisions, 
             # roughly every 10-20 microns depending of section length  
-            sec.nseg = 1 + 2 * int(sec.L / 20)  # TODO: is 20 microns the best?
+            sec.nseg = 1 + 2 * int(sec.L / self.segment_length)
 
             sec.Ra = self.Ra
             sec.cm = self.cm
             sec.insert("pas")
             sec.g_pas = self.g_pas
             sec.e_pas = self.e_pas
+
+    def _refresh_geometry_cache(self):
+        self.verts, self.edges, self.radii = self.get_vertices_edges_radii()
+        self.seg_xyz, self.seg_refs = self.get_segment_xyz()
+
+    def copy(self):
+        copied_cell = type(self)(
+            self.swc_path,
+            segment_length=self.segment_length,
+            Ra=self.Ra,
+            cm=self.cm,
+            g_pas=self.g_pas,
+            e_pas=self.e_pas,
+        )
+
+        if np.any(self.translation_um):
+            copied_cell.translate(self.translation_um)
+
+        return copied_cell
+
+    def translate(self, shift_um):
+        shift_um = np.asarray(shift_um, dtype=float)
+        if shift_um.shape != (3,):
+            raise ValueError('shift_um must be a length-3 vector of (dx, dy, dz) in microns')
+
+        if not np.any(shift_um):
+            return self
+
+        dx, dy, dz = shift_um
+        for sec in self.all:
+            n3d = int(sec.n3d())
+            for point_idx in range(n3d):
+                h.pt3dchange(
+                    point_idx,
+                    sec.x3d(point_idx) + dx,
+                    sec.y3d(point_idx) + dy,
+                    sec.z3d(point_idx) + dz,
+                    sec.diam3d(point_idx),
+                    sec=sec,
+                )
+
+        h.define_shape()
+        self.translation_um = self.translation_um + shift_um
+        self._refresh_geometry_cache()
+        return self
 
     def insert_extracellular(self):
         for sec in self.all:
